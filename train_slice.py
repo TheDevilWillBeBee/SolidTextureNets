@@ -11,7 +11,7 @@
 # Based on https://github.com/leongatys/PytorchNeuralStyleTransfer
 #
 
-
+from tqdm import tqdm
 import sys
 import random
 import datetime
@@ -238,48 +238,15 @@ class MultiScaleGen3D(nn.Module):
         y = self.last_conv(y)
         return y
 
-# gram matrix and loss
-class GramMatrix(nn.Module):
-    def forward(self, input):
-        b,c,h,w = input.size()
-        F = input.view(b, c, h*w)
-        G = torch.bmm(F, F.transpose(1,2))
-        G.div_(h*w*c)
-        return G
 
-class GramMSELoss(nn.Module):
-    def forward(self, input, target):
-        out = nn.MSELoss()(GramMatrix()(input), target)
-        return(out)
 
 # pre and post processing for images
 prep = transforms.Compose([
         transforms.ToTensor(),
-        #turn to BGR
-        transforms.Lambda(lambda x: x[torch.LongTensor([2,1,0])]),
-        #subtract imagenet mean
-        transforms.Normalize(mean=[0.40760392, 0.45795686, 0.48501961],
-                            std=[1,1,1]),
-        transforms.Lambda(lambda x: x.mul_(255)),
-        ])
-
-postpa = transforms.Compose([
-        transforms.Lambda(lambda x: x.mul_(1./255)),
-        #add imagenet mean
-        transforms.Normalize(mean=[-0.40760392, -0.45795686, -0.48501961],
-                            std=[1,1,1]),
-        #turn to RGB
-        transforms.Lambda(lambda x: x[torch.LongTensor([2,1,0])]),
         ])
 
 postpb = transforms.Compose([transforms.ToPILImage()])
 
-def postp(tensor):
-    t = postpa(tensor)
-    t[t>1] = 1
-    t[t<0] = 0
-    img = postpb(t)
-    return img
 
 # dependency values (specific to the architecture of MultiScaleGen3D)
 def dep_values(scale):
@@ -299,146 +266,141 @@ def size_input(h,w,d,scale):
          math.ceil(d/(math.pow(2, scale))+2*dep_values(scale))]
     return s
 
+for texture_name in range(1, 12):
 
-# create generator network
-n_input_ch = 3
-gen = MultiScaleGen3D(ch_in=3, ch_step=4)
-params = list(gen.parameters())
-total_parameters = 0
-for p in params:
-    total_parameters = total_parameters + p.data.numpy().size
-print('Generator''s total number of parameters = ' + str(total_parameters))
-
-# get descriptor network
-vgg = VGG(pool='avg', pad=1)
-vgg.load_state_dict(torch.load('./Models/vgg_conv.pth'))
-for param in vgg.parameters():
-    param.requires_grad = False
-vgg.cuda()
+    # create generator network
+    n_input_ch = 3
+    gen = MultiScaleGen3D(ch_in=3, ch_step=4)
+    params = list(gen.parameters())
+    total_parameters = 0
+    for p in params:
+        total_parameters = total_parameters + p.data.numpy().size
+    print('Generator''s total number of parameters = ' + str(total_parameters))
 
 
-# These lists must have the same number of elements (1-3)
-inputs_names = ['brown016_exemplar.png','brown016_exemplar.png','brown016_exemplar.png']
-directions = [0,1,2]
 
-# test folder, backup and results
-time_info = datetime.datetime.now()
-out_folder_name = time_info.strftime("%Y-%m-%d") + '_' \
-                  + inputs_names[0][:-4] \
-                  + '_3D' + time_info.strftime("_%H%M")
-if not os.path.exists('./Trained/' + out_folder_name):
-    os.mkdir( './Trained/' + out_folder_name)
+    # These lists must have the same number of elements (1-3)
+    # inputs_names = ['brown016_exemplar.png','brown016_exemplar.png','brown016_exemplar.png']
 
-# load images
-input_textures = [Image.open('./Textures/' + name) for name in inputs_names]
-input_textures_torch = [Variable(prep(img)).unsqueeze(0).cuda()
-                        for img in input_textures]
-# display images
-if disp:
-    for i,img in enumerate(input_textures):
-        img_disp = numpy.asarray(img, dtype="int32")
-        display.image(img_disp, win=['input'+str(i)],
-                    title=['Input texture d'+str(i)])
+    # inputs_names = ['brown016_exemplar.png']
+    inputs_names = ['t' + str(texture_name) + '.png']
 
-#define layers, loss functions, weights and compute optimization target
-loss_layers = ['r11', 'r21', 'r31', 'r41', 'r51']
-loss_fns = [GramMSELoss()] * len(loss_layers)
-loss_fns = [loss_fn.cuda() for loss_fn in loss_fns]
-w = [1,1,1,1,1]
+    directions = [0,1,2]
 
+    # test folder, backup and results
+    time_info = datetime.datetime.now()
+    out_folder_name = time_info.strftime("%Y-%m-%d") + '_' \
+                      + inputs_names[0][:-4] \
+                      + '_3D' + time_info.strftime("_%H%M")
+    if not os.path.exists('./Trained/' + out_folder_name):
+        os.mkdir( './Trained/' + out_folder_name)
 
-#compute optimization targets
-targets = []
-for img in input_textures_torch:
-    targets.append([GramMatrix()(f).detach() for f in vgg(img, loss_layers)])
-
-# training parameters
-slice_size = 128 # training slice resolution (best if same as examples)
-iterations = 3000
-show_iter = 10 # display every show_iter iterations
-save_params = 1000 # save parameters every save_params iterations
-save_slice = 100 # save generated slice every save_slice iterations
-learning_rate = 0.1
-batch_size = 8
-
-# reference coordinate of the slice initialization
-slice_coords = [0,0,0]
-
-gen.cuda()
-optimizer = optim.Adam(gen.parameters(), lr=learning_rate)
-loss_history = numpy.zeros(iterations)
-# run training
-for n_iter in range(iterations):
-    optimizer.zero_grad()
-
-    #Multiview loss
-    for idx,d in enumerate(directions):
-        target = targets[idx]
-        # slice dimensions - 1 voxel thick in dimension d
-        v_sizes = [slice_size for N in range(3)]
-        v_sizes[d] = 1
-        # reference coordinate of the slice reset
-        slice_coords = [0,0,0]
-
-        # batch evaluating one sample at a time to save memory for resolution
-        for i in range(batch_size):
-            # stochastic selection of one slice (determines shift config)
-            slice_coords[d] = random.randint(0,31)
-            gen.n_h = slice_coords[0]
-            gen.n_w = slice_coords[1]
-            gen.n_d = slice_coords[2]
-
-            # generation of noise inputs
-            sz = [size_input(v_sizes[0],v_sizes[1],v_sizes[2],k) for k in range(6)]
-            zk = [torch.rand(1,n_input_ch,szk[0],szk[1],szk[2]) for szk in sz]
-            z_samples = [Variable(z.cuda()) for z in zk ]
-
-            # slice synthesis
-            batch_sample = gen(z_samples)
-            if d == 0:
-                sample = batch_sample[:,:,0,0:v_sizes[1]:,0:v_sizes[2]]
-            if d == 1:
-                sample = batch_sample[:,:,0:v_sizes[0],0,0:v_sizes[2]]
-            if d == 2:
-                sample = batch_sample[:,:,0:v_sizes[0],0:v_sizes[1],0]
-            sample = sample.squeeze().unsqueeze(0)
-
-            # loss evaluation
-            out = vgg(sample, loss_layers)
-            losses = [w[a]*loss_fns[a](f, target[a]) for a,f in enumerate(out)]
-            single_loss = (1/(batch_size*len(targets)))*sum(losses)
-            single_loss.backward(retain_graph=False)
-
-            loss_history[n_iter] = loss_history[n_iter] + single_loss.item()
-            del out, losses, single_loss
-            del batch_sample, z_samples, zk
-
-        if disp:
-            if n_iter%show_iter == (show_iter-1):
-                out_img = postp(sample.data.cpu().squeeze())
-                out_img_array = numpy.asarray( out_img, dtype="int32" )
-                display.image(out_img_array, win='sample'+str(d),
-                              title='Generated sample d'+str(d))
-
-        if n_iter%save_slice == (save_slice-1):
-            out_img = postp(sample.data.cpu().squeeze())
-            out_img.save('./Trained/' + out_folder_name + '/training_d'
-                         + str(d) + '_' + str(n_iter+1) + '.jpg', "JPEG")
-        del sample
+    # load images
+    input_textures = [Image.open('./Textures/' + name) for name in inputs_names]
+    input_textures_torch = [Variable(prep(img)).unsqueeze(0).cuda()
+                            for img in input_textures]
+    # display images
+    if disp:
+        for i,img in enumerate(input_textures):
+            img_disp = numpy.asarray(img, dtype="int32")
+            display.image(img_disp, win=['input'+str(i)],
+                        title=['Input texture d'+str(i)])
 
 
-    print('Iteration: %d, loss: %f'%(n_iter, loss_history[n_iter]))
+    print(input_textures_torch[0].min(), input_textures_torch[0].max())
 
-    if n_iter%save_params == (save_params-1):
-        torch.save(gen, './Trained/' + out_folder_name
-                   + '/trained_model_' + str(n_iter+1) + '.py')
-        torch.save(gen.state_dict(), './Trained/' + out_folder_name
-                   + '/params' + str(n_iter+1) + '.pytorch')
+    from appearance_loss import AppearanceLoss
+    class Args:
+        appearance_loss_type = 'Gram'
+        DEVICE = torch.device('cuda:0')
+        img_size = 128
 
-    optimizer.step()
+    args = Args()
+
+    loss_fn = AppearanceLoss(args)
 
 
-# save final model and training history
-torch.save(gen,'./Trained/'+out_folder_name +'/trained_model.py')
-torch.save(gen.state_dict(),'./Trained/'+out_folder_name+'/params.pytorch')
-numpy.save('./Trained/'+out_folder_name+'/loss_history',loss_history)
+    # training parameters
+    slice_size = 128 # training slice resolution (best if same as examples)
+    iterations = 3000
+    show_iter = 10 # display every show_iter iterations
+    save_params = 1000 # save parameters every save_params iterations
+    save_slice = 100 # save generated slice every save_slice iterations
+    learning_rate = 0.1
+    batch_size = 8
+
+    # reference coordinate of the slice initialization
+    slice_coords = [0,0,0]
+
+    gen.cuda()
+    optimizer = optim.Adam(gen.parameters(), lr=learning_rate)
+    loss_history = numpy.zeros(iterations)
+    # run training
+
+    pbar = tqdm(range(iterations))
+    for n_iter in pbar:
+        optimizer.zero_grad()
+
+        #Multiview loss
+        for idx,d in enumerate(directions):
+            # slice dimensions - 1 voxel thick in dimension d
+            v_sizes = [slice_size for N in range(3)]
+            v_sizes[d] = 1
+            # reference coordinate of the slice reset
+            slice_coords = [0,0,0]
+
+            # batch evaluating one sample at a time to save memory for resolution
+            for i in range(batch_size):
+                # stochastic selection of one slice (determines shift config)
+                slice_coords[d] = random.randint(0,31)
+                gen.n_h = slice_coords[0]
+                gen.n_w = slice_coords[1]
+                gen.n_d = slice_coords[2]
+
+                # generation of noise inputs
+                sz = [size_input(v_sizes[0],v_sizes[1],v_sizes[2],k) for k in range(6)]
+                zk = [torch.rand(1,n_input_ch,szk[0],szk[1],szk[2]) for szk in sz]
+                z_samples = [Variable(z.cuda()) for z in zk ]
+
+                # slice synthesis
+                batch_sample = gen(z_samples)
+                if d == 0:
+                    sample = batch_sample[:,:,0,0:v_sizes[1]:,0:v_sizes[2]]
+                if d == 1:
+                    sample = batch_sample[:,:,0:v_sizes[0],0,0:v_sizes[2]]
+                if d == 2:
+                    sample = batch_sample[:,:,0:v_sizes[0],0:v_sizes[1],0]
+                sample = sample.squeeze().unsqueeze(0)
+
+                # loss evaluation
+                single_loss, _, _ = loss_fn({'target_image_list': input_textures_torch, 'generated_image_list': [sample]})
+                single_loss.backward(retain_graph=False)
+
+                loss_history[n_iter] = loss_history[n_iter] + single_loss.item()
+                del single_loss
+                del batch_sample, z_samples, zk
+
+
+
+            if n_iter%save_slice == (save_slice-1):
+                out_img = torch.clip(sample, 0.0, 1.0).squeeze().detach().cpu().numpy().transpose(1, 2, 0)
+
+                out_img = Image.fromarray((out_img * 255.0).astype(numpy.uint8))
+                out_img.save('./Trained/' + out_folder_name + '/training_d'
+                             + str(d) + '_' + str(n_iter+1) + '.jpg', "JPEG")
+            del sample
+
+
+        pbar.set_postfix({"loss": loss_history[n_iter]})
+        # print('Iteration: %d, loss: %f'%(n_iter, ))
+
+        # if n_iter%save_params == (save_params-1):
+        #     torch.save(gen.state_dict(), './Trained/' + out_folder_name
+        #                + '/params' + str(n_iter+1) + '.pth')
+
+        optimizer.step()
+
+
+    # save final model and training history
+    torch.save(gen.state_dict(),'./Trained/'+out_folder_name+'/params.pth')
+    numpy.save('./Trained/'+out_folder_name+'/loss_history',loss_history)

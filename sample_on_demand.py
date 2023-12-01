@@ -245,12 +245,12 @@ def sample_noise(x1,x2,y1,y2,z1,z2,n_ch,scale):
     return noise_cpu
 
 
-model_folder = './Trained/2020-01-10_brown016_exemplar_3D_2036'
+model_folder = './Trained/2023-12-01_t1_3D_0333'
 
 #load model
 n_input_ch = 3
 generator = MultiScaleGen3D(ch_in=n_input_ch,  ch_step=4)
-generator.load_state_dict(torch.load('./' + model_folder + '/params.pytorch'))
+generator.load_state_dict(torch.load('./' + model_folder + '/params.pth'))
 generator.cuda()
 generator.eval()
 
@@ -267,9 +267,9 @@ piece_width = 64
 piece_depth = 64
 
 # total size of the sample
-total_H = 512
-total_W = 512
-total_D = 512
+total_H = 256
+total_W = 256
+total_D = 256
 
 full_vol = np.zeros((3,total_H,total_W,total_D),dtype='uint8')
 imagenet_mean = torch.Tensor([0.40760392, 0.45795686, 0.48501961])
@@ -310,8 +310,11 @@ for i in range(0,total_H,h):
             z_var = [Variable(z, volatile=True).cuda() for z in  z_list]
 
             sample = generator(z_var)
-            out = sample.data[0,:,:,:,:].squeeze(0)*(1./255) + imagenet_mean
-            out = 255*out.clamp(0,1)
+            # print(sample.max(), sample.mean(), sample.min())
+            # out = sample.data[0,:,:,:,:].squeeze(0)*(1./255) + imagenet_mean
+            out = sample.data[0,:,:,:,:].squeeze(0).clamp(0.0, 1.0)
+            
+            out = 255.0 * out
 
             full_vol[:,i:i+h,j:j+w,k:k+d] = np.uint8(out.cpu().numpy())
             n_blocks = n_blocks + 1
@@ -323,7 +326,7 @@ print(str(n_blocks) + ' blocks of size ' + str(piece_height) + 'x' + str(piece_w
 np.save('./' + model_folder + '/offline_ondemand_volume_' + str(total_H) + '_' + str(total_W) + '_' + str(total_D), full_vol)
 
 # switch to RGB before slicing and saving images
-full_vol = full_vol[[2,1,0],:,:,:]
+# full_vol = full_vol[[2,1,0],:,:,:]
 if slice:
     middle_slice = full_vol[:,int(total_H/2),:,:].squeeze().transpose(1,2,0)
     im = Image.fromarray(middle_slice)
