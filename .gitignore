@@ -1,5 +1,13 @@
+*.zip
+*.mp4
+
 Textures/
+Textures2/
 Trained/
+Trained_old/
+Trained_pbr/
+renders/
+Models/
 meshes/
 __pycache__/
 .ipynb_checkpoints/

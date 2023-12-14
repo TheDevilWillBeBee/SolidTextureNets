@@ -266,7 +266,10 @@ def size_input(h,w,d,scale):
          math.ceil(d/(math.pow(2, scale))+2*dep_values(scale))]
     return s
 
-for texture_name in range(1, 12):
+# files = list(range(17, 22)) + [3, 4, 6, 7]
+# files = range(1, 25)
+files = [6, 7]
+for texture_name in files:
 
     # create generator network
     n_input_ch = 3
@@ -283,7 +286,9 @@ for texture_name in range(1, 12):
     # inputs_names = ['brown016_exemplar.png','brown016_exemplar.png','brown016_exemplar.png']
 
     # inputs_names = ['brown016_exemplar.png']
+    # inputs_names = ['t' + str(texture_name) + '.png']
     inputs_names = ['t' + str(texture_name) + '.png']
+    
 
     directions = [0,1,2]
 
@@ -296,7 +301,7 @@ for texture_name in range(1, 12):
         os.mkdir( './Trained/' + out_folder_name)
 
     # load images
-    input_textures = [Image.open('./Textures/' + name) for name in inputs_names]
+    input_textures = [Image.open('./Textures/' + name).resize((128, 128)) for name in inputs_names]
     input_textures_torch = [Variable(prep(img)).unsqueeze(0).cuda()
                             for img in input_textures]
     # display images
